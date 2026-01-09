@@ -158,6 +158,9 @@ scheduler.add_job(func=collect_data, trigger="interval", minutes=15, id="collect
 scheduler.add_job(func=keep_alive, trigger="interval", minutes=10, id="keepalive")
 scheduler.start()
 
+# Run initial collection on startup
+collect_data()
+
 # Shut down scheduler when app exits
 atexit.register(lambda: scheduler.shutdown())
 
@@ -189,9 +192,6 @@ def status():
 
 
 if __name__ == '__main__':
-    # Run initial collection on startup
-    collect_data()
-
-    # Start Flask
+    # Start Flask (for local testing)
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
