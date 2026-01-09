@@ -2,12 +2,15 @@
 Estimate January 2026 bill (billing cycle 12/12/25 - 1/13/26)
 Using 0.12 CCF/HDD slope and actual meter data from Neon database
 Fetches weather forecast from NWS for future day estimates
+Uses IEM ASOS data for historical hourly temps (KBWG)
 """
 import os
-import re
 import psycopg2
 import requests
 from datetime import datetime, timedelta
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # =============================================================================
 # DATABASE CONNECTION
@@ -37,10 +40,61 @@ def get_meter_readings():
     return latest
 
 
+def get_iem_hourly_temps(start_date, end_date):
+    """
+    Fetch hourly temperature data from Iowa Environmental Mesonet (IEM)
+    for Bowling Green airport (KBWG)
+    """
+    url = (
+        f"https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py?"
+        f"station=KBWG&data=tmpf"
+        f"&year1={start_date.year}&month1={start_date.month}&day1={start_date.day}"
+        f"&year2={end_date.year}&month2={end_date.month}&day2={end_date.day}"
+        f"&tz=America%2FChicago&format=onlycomma&latlon=no&elev=no"
+        f"&missing=M&trace=T&direct=no&report_type=3"
+    )
+
+    try:
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+
+        # Parse CSV data
+        lines = response.text.strip().split('\n')
+        hourly_data = {}  # {date: [temps]}
+
+        for line in lines[1:]:  # Skip header
+            parts = line.split(',')
+            if len(parts) >= 3 and parts[2] != 'M':
+                date_str = parts[1].split()[0]  # "2026-01-09"
+                temp = float(parts[2])
+
+                if date_str not in hourly_data:
+                    hourly_data[date_str] = []
+                hourly_data[date_str].append(temp)
+
+        return hourly_data
+
+    except Exception as e:
+        print(f"[IEM] Error fetching hourly data: {e}")
+        return None
+
+
+def calculate_hourly_hdd(temps):
+    """
+    Calculate HDD from hourly temperatures
+    Each hour contributes: max(0, 65 - temp) / 24
+    """
+    if not temps or len(temps) < 20:  # Need most of the day's readings
+        return None
+
+    total_hdd = sum(max(0, 65 - temp) for temp in temps) / len(temps) * 24 / 24
+    # Simplified: average the hourly HDDs
+    total_hdd = sum(max(0, 65 - temp) for temp in temps) / len(temps)
+    return total_hdd
+
+
 def get_nws_forecast():
     """Fetch weather forecast from NWS API for Bowling Green, KY"""
-    # NWS API endpoint for Bowling Green, KY
-    # First get the forecast URL from the points endpoint
     points_url = "https://api.weather.gov/points/36.9685,-86.4808"
     headers = {"User-Agent": "GasBillEstimator/1.0"}
 
@@ -50,23 +104,18 @@ def get_nws_forecast():
         data = response.json()
         forecast_url = data["properties"]["forecast"]
 
-        # Get the actual forecast
         response = requests.get(forecast_url, headers=headers, timeout=10)
         response.raise_for_status()
         forecast_data = response.json()
 
-        # Parse periods into day/night pairs
         periods = forecast_data["properties"]["periods"]
         daily_forecasts = {}
 
         for period in periods:
-            name = period["name"]
             temp = period["temperature"]
             is_day = period["isDaytime"]
-
-            # Extract date from startTime
             start_time = datetime.fromisoformat(period["startTime"].replace("Z", "+00:00"))
-            date_key = start_time.strftime("%m/%d")
+            date_key = start_time.strftime("%Y-%m-%d")
 
             if date_key not in daily_forecasts:
                 daily_forecasts[date_key] = {"high": None, "low": None, "date": start_time}
@@ -76,19 +125,15 @@ def get_nws_forecast():
             else:
                 daily_forecasts[date_key]["low"] = temp
 
-        # Fill in missing lows from next day's night forecast or estimate
-        dates = sorted(daily_forecasts.keys())
-        for i, date in enumerate(dates):
-            if daily_forecasts[date]["low"] is None:
-                # Try to get from overnight period or estimate
-                if daily_forecasts[date]["high"]:
-                    # Rough estimate: low is typically 15-25 degrees below high
-                    daily_forecasts[date]["low"] = daily_forecasts[date]["high"] - 20
+        # Fill in missing lows
+        for date in daily_forecasts:
+            if daily_forecasts[date]["low"] is None and daily_forecasts[date]["high"]:
+                daily_forecasts[date]["low"] = daily_forecasts[date]["high"] - 20
 
         return daily_forecasts
 
     except Exception as e:
-        print(f"[Weather] Error fetching forecast: {e}")
+        print(f"[NWS] Error fetching forecast: {e}")
         return None
 
 
@@ -138,81 +183,138 @@ except Exception as e:
     meter_latest = 1409  # Fallback
     reading_date = datetime(2026, 1, 9)
 
-# HDD data from weather (12/12 - 1/8)
-hdd_dec_12_to_jan_8 = 554.5  # Calculated from actual weather
-
-# Billing cycle
+# Billing cycle info
 billing_start = "12/12/25"
 billing_end = "1/13/26"
 
 # =============================================================================
-# WEATHER FORECAST FOR REMAINING DAYS
+# HDD CALCULATION: HYBRID APPROACH
+# - Past days: Hourly temps from IEM ASOS (KBWG)
+# - Future days: NWS forecast high/low
 # =============================================================================
 
-# CCF slope
 ccf_per_hdd = 0.12
+billing_start_date = datetime(2025, 12, 12)
+billing_end_date = datetime(2026, 1, 13)
+today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+
+print("\n" + "=" * 60)
+print("HDD CALCULATION (Hybrid: IEM hourly + NWS forecast)")
+print("=" * 60)
+
+# Fetch historical hourly data from IEM
+print("\nFetching IEM hourly data (KBWG)...")
+hourly_data = get_iem_hourly_temps(billing_start_date, today)
 
 # Fetch NWS forecast for future days
-billing_end_date = datetime(2026, 1, 13)
-forecast_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-
-print("\nFetching NWS forecast...")
+print("Fetching NWS forecast...")
 forecast_data = get_nws_forecast()
 
-if forecast_data:
-    future_forecast = calculate_future_hdd(forecast_data, forecast_start, billing_end_date)
-    print(f"\n{'Date':<8} {'High':>6} {'Low':>6} {'Avg':>6} {'HDD':>6} {'CCF':>6}")
-    print("-" * 46)
+# Calculate HDD for each day
+print(f"\n{'Date':<12} {'Source':<10} {'Temps':<20} {'HDD':>8} {'CCF':>8}")
+print("-" * 62)
 
-    total_future_hdd = 0
-    for day in future_forecast:
-        ccf = day["hdd"] * ccf_per_hdd
-        print(f"{day['date']:<8} {day['high']:>6} {day['low']:>6} {day['avg']:>6.1f} {day['hdd']:>6.1f} {ccf:>6.2f}")
-        total_future_hdd += day["hdd"]
+total_hdd = 0
+total_ccf = 0
+current_date = billing_start_date
 
-    future_ccf = total_future_hdd * ccf_per_hdd
-    future_days_count = len(future_forecast)
-    print("-" * 46)
-    print(f"{'Total':<8} {'':>6} {'':>6} {'':>6} {total_future_hdd:>6.1f} {future_ccf:>6.2f}")
-else:
-    # Fallback to estimate if forecast fails
-    print("[Weather] Using fallback estimate (25 HDD/day)")
-    future_days_count = (billing_end_date - forecast_start).days + 1
-    total_future_hdd = future_days_count * 25
-    future_ccf = total_future_hdd * ccf_per_hdd
+while current_date <= billing_end_date:
+    date_str = current_date.strftime("%Y-%m-%d")
+    date_display = current_date.strftime("%m/%d")
+
+    if current_date < today and hourly_data and date_str in hourly_data:
+        # Past day with hourly data - use IEM
+        temps = hourly_data[date_str]
+        if len(temps) >= 20:
+            hdd = calculate_hourly_hdd(temps)
+            temp_info = f"{min(temps):.0f}-{max(temps):.0f}F ({len(temps)}hr)"
+            source = "IEM"
+        else:
+            # Not enough hourly data, fall back to high/low
+            hdd = max(0, 65 - (max(temps) + min(temps)) / 2) if temps else 0
+            temp_info = f"{min(temps):.0f}-{max(temps):.0f}F (partial)"
+            source = "IEM*"
+    elif forecast_data and date_str in forecast_data:
+        # Future day - use NWS forecast
+        fc = forecast_data[date_str]
+        if fc["high"] and fc["low"]:
+            avg = (fc["high"] + fc["low"]) / 2
+            hdd = max(0, 65 - avg)
+            temp_info = f"{fc['low']}-{fc['high']}F (fcst)"
+            source = "NWS"
+        else:
+            hdd = 25  # Fallback
+            temp_info = "est"
+            source = "Est"
+    else:
+        # No data - estimate
+        hdd = 25
+        temp_info = "no data"
+        source = "Est"
+
+    ccf = hdd * ccf_per_hdd
+    total_hdd += hdd
+    total_ccf += ccf
+
+    print(f"{date_display:<12} {source:<10} {temp_info:<20} {hdd:>8.1f} {ccf:>8.2f}")
+    current_date += timedelta(days=1)
+
+print("-" * 62)
+print(f"{'TOTAL':<12} {'':<10} {'':<20} {total_hdd:>8.1f} {total_ccf:>8.2f}")
+
+# Calculate remaining CCF (future days only)
+remaining_hdd = 0
+remaining_ccf = 0
+current_date = today
+while current_date <= billing_end_date:
+    date_str = current_date.strftime("%Y-%m-%d")
+    if forecast_data and date_str in forecast_data:
+        fc = forecast_data[date_str]
+        if fc["high"] and fc["low"]:
+            hdd = max(0, 65 - (fc["high"] + fc["low"]) / 2)
+            remaining_hdd += hdd
+            remaining_ccf += hdd * ccf_per_hdd
+    else:
+        remaining_hdd += 25
+        remaining_ccf += 25 * ccf_per_hdd
+    current_date += timedelta(days=1)
 
 # =============================================================================
 # USAGE CALCULATION
 # =============================================================================
 
-print("=" * 70)
+print("\n" + "=" * 70)
 print("JANUARY 2026 BILL ESTIMATE (Cycle: 12/12/25 - 1/13/26)")
 print("=" * 70)
 
 # Actual usage Dec 11 - latest reading
-actual_ccf_so_far = meter_latest - meter_dec_11
+actual_ccf_so_far = float(meter_latest) - meter_dec_11
 print(f"\nMeter Readings:")
 print(f"  Dec 11:  {meter_dec_11} (billing start)")
 print(f"  Latest:  {meter_latest} ({reading_date.strftime('%b %d') if hasattr(reading_date, 'strftime') else reading_date})")
 print(f"  Used:    {actual_ccf_so_far} CCF")
 
-# Total for billing cycle
-total_ccf_exact = actual_ccf_so_far + future_ccf
-total_ccf = int(total_ccf_exact)  # Meter rounds down
+# Total for billing cycle: actual meter + future estimate
+total_ccf_exact = actual_ccf_so_far + remaining_ccf
+total_ccf_int = int(total_ccf_exact)  # Meter rounds down
 
 # Meter could be anywhere from X.0 to X.99, so estimate range
-estimated_meter_low = meter_dec_11 + total_ccf
-estimated_meter_high = meter_dec_11 + total_ccf + 1
+estimated_meter_low = int(meter_dec_11 + total_ccf_int)
+estimated_meter_high = int(meter_dec_11 + total_ccf_int + 1)
 
 print(f"\n{'='*40}")
 print(f"SUMMARY")
 print(f"{'='*40}")
-print(f"  Usage so far:     {actual_ccf_so_far} CCF")
-print(f"  Future estimate:  {future_ccf:.1f} CCF")
-print(f"  Total (exact):    {total_ccf_exact:.1f} CCF")
-print(f"  Total (metered):  {total_ccf} CCF")
-print(f"  Est. meter 1/13:  {estimated_meter_low}-{estimated_meter_high}")
+print(f"  Actual (metered):   {actual_ccf_so_far} CCF")
+print(f"  Remaining (HDD):    {remaining_ccf:.1f} CCF ({remaining_hdd:.0f} HDD)")
+print(f"  Total (exact):      {total_ccf_exact:.1f} CCF")
+print(f"  Total (rounded):    {total_ccf_int} CCF")
+print(f"  Est. meter 1/13:    {estimated_meter_low}-{estimated_meter_high}")
 print(f"{'='*40}")
+
+# For WNA and bill calculations
+total_ccf = total_ccf_int
+total_future_hdd = total_hdd  # Full billing period HDD for WNA
 
 # =============================================================================
 # WNA CALCULATION
@@ -227,25 +329,21 @@ R = 1.6261       # Distribution rate $/Mcf
 HSF = 0.012576   # Heat sensitivity factor
 BL = 1.0556      # Base load
 
-# Total HDD for billing cycle
-total_add = hdd_dec_12_to_jan_8 + total_future_hdd
-# For future days, ADD = NDD, so they don't affect WNA
-# WNA is based only on actual period where ADD may differ from NDD
+# ADD = actual HDD for billing cycle (from hybrid calculation)
+ADD = total_hdd
 
-# Estimate NDD for the actual period (12/12 - 1/8 = 28 days)
-# Using ~24 HDD/day as normal for Dec-Jan
+# NDD = normal HDD for billing cycle
+# 33 days × ~24 HDD/day normal for Dec-Jan
+billing_days = (billing_end_date - billing_start_date).days + 1
 ndd_daily = 24
-actual_days = 28
-ndd_actual_period = actual_days * ndd_daily
+NDD = billing_days * ndd_daily
 
-print(f"\nActual period (12/12 - 1/8): {actual_days} days")
-print(f"  Actual ADD:    {hdd_dec_12_to_jan_8:.1f}")
-print(f"  Normal NDD:    {ndd_actual_period:.1f} ({ndd_daily}/day)")
-print(f"  Difference:    {ndd_actual_period - hdd_dec_12_to_jan_8:.1f}")
+print(f"\nBilling period: {billing_days} days")
+print(f"  Actual ADD:    {ADD:.1f} (from IEM hourly + NWS forecast)")
+print(f"  Normal NDD:    {NDD:.1f} ({ndd_daily}/day)")
+print(f"  Difference:    {NDD - ADD:.1f}")
 
 # Calculate WNAF
-ADD = hdd_dec_12_to_jan_8
-NDD = ndd_actual_period
 wnaf = R * (HSF * (NDD - ADD)) / (BL + (HSF * ADD))
 print(f"\nWNA Factor: ${wnaf:.4f}/Mcf (${wnaf/10:.6f}/Ccf)")
 
