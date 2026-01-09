@@ -88,10 +88,12 @@ Windows Task Scheduler runs `thermostat_collector.py` every 15 minutes via `run_
 
 ### Heating Degree Days (HDD)
 ```
-HDD = max(0, base_temp - outdoor_temp)
+HDD = max(0, 65 - avg_daily_temp)
 ```
-- **Base temperature:** 65°F (downstairs setpoint)
+- **Base temperature:** 65°F (NOAA/industry standard, also used by Atmos Energy for WNA calculations)
+- **Avg daily temp:** (high + low) / 2
 - Higher HDD = more heating demand
+- 0 HDD when avg temp >= 65°F
 
 ### Gas Usage Factor
 Based on historical data (Dec 11 - Jan 7, 2026):
@@ -214,16 +216,23 @@ factor = (63 - 40) / (65 - 40)  # = 0.92
 ## Current Billing Period Tracking
 
 ### Meter Readings (Dec 11, 2025 - present)
-| Date/Time | Reading | CCF Used |
-|-----------|---------|----------|
+Meter readings now stored in Neon database (`gas_meter_readings` table) with 0.5 CCF precision.
+
+| Date/Time (CST) | Reading | CCF Used |
+|-----------------|---------|----------|
 | Dec 11 (start) | 1339 | - |
-| Jan 7 10pm | 1408 | 69 (cumulative) |
-| Jan 8 7am | 1409 | 1 (overnight) |
-| Jan 8 5pm | 1410 | 1 (daytime) |
+| Jan 7 6:05pm | 1408.5 | 69.5 (cumulative) |
+| Jan 8 7:12am | 1409.5 | 1.0 (overnight) |
+| Jan 8 5:02pm | 1409.5 | 0.0 |
+| Jan 9 6:50am | 1409.5 | 0.0 |
 
 ### January 2026 Bill Projection
-- **Estimated total CCF:** 85-90
-- **Estimated bill:** $96-101
+Based on NWS forecast data and 0.12 CCF/HDD factor:
+- **Usage so far:** 70.5 CCF (Dec 11 - Jan 9)
+- **Forecast remaining:** ~12 CCF (Jan 9-13)
+- **Estimated total CCF:** 82-83
+- **Estimated meter on 1/13:** 1421-1422
+- **Estimated bill:** ~$95
 
 ---
 
@@ -231,22 +240,36 @@ factor = (63 - 40) / (65 - 40)  # = 0.92
 
 | File | Purpose |
 |------|---------|
-| `thermostat_collector.py` | Main data collection script |
+| `app.py` | Flask server for Render deployment (24/7 collection) |
+| `thermostat_collector.py` | Original local data collection script |
+| `estimate_jan_bill.py` | Bill estimator using NWS forecast + meter data |
+| `bowling_green_wna.py` | WNA calculator for Bowling Green, KY |
 | `log_meter.py` | CLI for logging gas meter readings |
-| `run_collector.bat` | Batch file for Task Scheduler |
+| `render.yaml` | Render deployment configuration |
 | `.env` | Environment variables (credentials) |
-| `.gitignore` | Excludes .env and other files from git |
 | `requirements.txt` | Python dependencies |
+
+---
+
+## Deployment
+
+Thermostat data collection runs on **Render** (free tier):
+- **URL:** https://thermostat-render.onrender.com
+- **Collection interval:** Every 15 minutes
+- **Self-ping:** Every 10 minutes (keeps free tier awake)
+- **Endpoints:**
+  - `/` - Health check + last collection status
+  - `/collect` - Manual trigger
+  - `/status` - Last collection result
 
 ---
 
 ## Next Steps
 
-1. **Collect overnight data** (Jan 8-9) to observe heating patterns
-2. **Calibrate heat_rise_factor** based on when upstairs kicks on
-3. **Validate 0.12 CCF/HDD factor** with more meter readings
-4. **Build prediction model** for monthly bills based on weather forecast
-5. **Create dashboard/visualization** of temperature vs. gas usage
+1. **Calibrate heat_rise_factor** based on when upstairs kicks on
+2. **Validate 0.12 CCF/HDD factor** with more meter readings
+3. **Build prediction model** for monthly bills based on weather forecast
+4. **Create dashboard/visualization** of temperature vs. gas usage
 
 ---
 
