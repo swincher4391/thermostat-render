@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: thermostat-collector
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: PYHTCC_EMAIL
+        sync: false
+      - key: PYHTCC_PASS
+        sync: false
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      # RENDER_EXTERNAL_URL is auto-provided by Render

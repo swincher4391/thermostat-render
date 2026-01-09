@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:www.timeanddate.com)",
+      "mcp__Neon__list_projects",
+      "mcp__Neon__run_sql_transaction",
+      "mcp__Neon__get_connection_string",
+      "mcp__Neon__run_sql",
+      "WebFetch(domain:forecast.weather.gov)",
+      "WebFetch(domain:www.atmosenergy.com)",
+      "Bash(python:*)",
+      "WebFetch(domain:psc.ky.gov)",
+      "mcp__Neon__get_database_tables",
+      "mcp__Neon__describe_table_schema",
+      "Bash(git init:*)",
+      "Bash(git remote add:*)",
+      "Bash(git add:*)"
+    ]
+  }
+}
