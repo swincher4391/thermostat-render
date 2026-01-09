@@ -13,10 +13,9 @@ from datetime import datetime, timedelta
 # DATABASE CONNECTION
 # =============================================================================
 
-DATABASE_URL = os.environ.get(
-    "DATABASE_URL",
-    "postgresql://neondb_owner:npg_BSM3cGvxtF1k@ep-delicate-sea-ah563pvy-pooler.c-3.us-east-1.aws.neon.tech/neondb?sslmode=require"
-)
+DATABASE_URL = os.environ.get("DATABASE_URL")
+if not DATABASE_URL:
+    raise ValueError("DATABASE_URL environment variable required")
 
 def get_meter_readings():
     """Fetch meter readings from Neon database"""
